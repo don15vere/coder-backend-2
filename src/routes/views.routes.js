@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { verifyToken } from "../utils/index.js";
 import passport from "passport";
+import UserDTO from "../dto/user.dto.js";
+
 const router = Router();
 
 router.get("/register", (req, res) => {
@@ -23,11 +25,20 @@ router.get("/login", (req, res) => {
 //   res.render("profile", { title: "PROFILE", user: user });
 // });
 
+router.get("/reset-password", (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.redirect("/login");
+
+  res.render("resetPassword", { title: "Restablecer contraseña", token });
+});
+
 router.get(
   "/profile",
-  passport.authenticate("jwt", { session: false }),
+  passport.authenticate("current", { session: false }),
   (req, res) => {
-    res.render("profile", { user: req.user.user });
+    const userData = req.user.user || req.user;
+    const userDTO = new UserDTO(userData);
+    res.render("profile", { user: userDTO });
   }
 );
 router.get("/recupero", (req, res) => {

@@ -1,133 +1,195 @@
 import { Router } from "express";
-import { createHash, isValidadPassword } from "../utils/index.js";
-import userModel from "../models/users.model.js";
 import passport from "passport";
-import { generateToken } from "../utils/index.js";
+
+import UserService from "../services/user.service.js";
+import CartService from "../services/cart.service.js";
+import UserDTO from "../dto/user.dto.js";
+import config from "../config/config.js";
+
+import {
+  createHash,
+  isValidadPassword,
+  generateToken,
+  generateResetToken,
+  verifyToken
+} from "../utils/index.js";
+
+import { sendPasswordResetEmail } from "../services/mail.service.js";
+
 const router = Router();
-// rutas post
+const userService = new UserService();
+
+/* ============================================================
+   REGISTER
+   ============================================================ */
+
 router.post("/register", async (req, res) => {
-  const { first_name, last_name, email, password } = req.body;
-  const password_hash = createHash(password);
   try {
-    const userExist = await userModel.findOne({ email });
-    if (userExist) {
-      return res.status(400).json({ message: "El correo ya existe" });
+    const { first_name, last_name, email, password, age, role } = req.body;
+
+    const userExists = await userService.findByEmail(email);
+    if (userExists) {
+      return res.status(400).json({ message: "El correo ya está registrado" });
     }
-    const newUser = {
+
+    const passwordHash = createHash(password);
+    const newCart = await CartService.create({ products: [] });
+
+    await userService.register({
       first_name,
       last_name,
       email,
-      password: password_hash,
-    };
-    await userModel.create(newUser);
+      age,
+      password: passwordHash,
+      role: role || "user",
+      cart: newCart._id,
+    });
 
-    res.status(201).redirect("/login");
+    return res.redirect("/login");
+
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Error interno del servidor", err: error.message });
+    console.error("Error en register:", error);
+    return res.status(500).json({ message: "Error interno del servidor" });
   }
 });
-// router.post('/register',passport.authenticate('register',{failureRedirect:"failregister"}), async(req,res)=>{
-//   res.redirect("/login")
-// })
 
-// router.get("/failregister", (req, res) => {
-//   res
-//     .status(400)
-//     .send({ status: "error", message: "Error al registrar el usuario" });
-// });
+/* ============================================================
+   LOGIN
+   ============================================================ */
 
-// router.post("/login", async (req, res) => {
-//   const { email, password } = req.body;
-
-//   try {
-//     const userExist = await userModel.findOne({ email: email });
-//     if (userExist) {
-//       const isValid = isValidadPassword(password, userExist.password);
-//       if (isValid) {
-//         req.session.user = {
-//           first_name: userExist.first_name,
-//           last_name: userExist.last_name,
-//           email: userExist.email,
-//         };
-//         res.redirect("/profile");
-//       } else {
-//         res.status(401).json({ message: "Error de credenciales" });
-//       }
-//     }
-//   } catch (error) {
-//     res
-//       .status(500)
-//       .json({ message: "Error interno del servidor", err: error.mesagge });
-//   }
-// });
 router.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-
   try {
-    const userExist = await userModel.findOne({ email: email });
-    if (userExist) {
-      const isValid = isValidadPassword(password, userExist.password);
-      if (isValid) {
-        const userPayload = {
-          id: userExist._id,
-          first_name: userExist.first_name,
-          last_name: userExist.last_name,
-          email: userExist.email,
-        };
-        const token = generateToken(userPayload);
-        // console.log(token);
+    const { email, password } = req.body;
 
-        res.cookie("authCookie", token, { maxAge: 3600000, httpOnly: true });
-        // res.send({ status: "success", message: "Login exitoso" });
-        res.redirect("/profile");
-      } else {
-        res.status(401).json({ message: "Error de credenciales" });
-      }
+    const user = await userService.findByEmail(email);
+    if (!user) {
+      return res.status(400).json({ message: "Usuario no encontrado" });
     }
+
+    const validPassword = isValidadPassword(password, user.password);
+    if (!validPassword) {
+      return res.status(400).json({ message: "Contraseña incorrecta" });
+    }
+
+    const token = generateToken({
+      id: user._id,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      email: user.email,
+      role: user.role,
+      age: user.age,
+      cart: user.cart
+    });
+
+    res.cookie(config.cookieName, token, {
+      httpOnly: true,
+      maxAge: 60 * 60 * 1000
+    });
+
+    res.redirect("/profile");
+
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Error interno del servidor", err: error.mesagge });
+    console.error("Error en login:", error);
+    return res.status(500).json({ message: "Error interno" });
   }
 });
 
-// recupero de pass
-router.post("/recupero", async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    // validamos si recibimos todos los campos
-    const userFound = await userModel.findOne({ email });
-    const password_hash = createHash(password);
-    userFound.password = password_hash;
-    await userFound.save();
-    res.redirect("/login");
-  } catch (error) {
-    // agregar respuesta
-  }
+/* ============================================================
+   LOGOUT
+   ============================================================ */
+
+router.get("/logout", (req, res) => {
+  res.clearCookie("authCookie");
+  res.redirect("/login");
 });
 
-// logout
-router.post("/logout", (req, res, next) => {
-  if (req.session.user) {
-    // Destruimos la session
-  }
-});
+/* ============================================================
+   CURRENT (JWT strategy + DTO)
+   ============================================================ */
 
 router.get(
   "/current",
-  passport.authenticate("jwt", { session: false }),
+  passport.authenticate("current", { session: false }),
   (req, res) => {
-    
-    if (!req.user) {
-      return res.status(401).send({ status: "error", message: "No autenticado" });
+    try {
+      const userData = req.user.user || req.user;
+      const userDTO = new UserDTO(userData);
+
+      res.send({
+        status: "success",
+        user: userDTO
+      });
+    } catch (error) {
+      console.error("Error en /current:", error);
+      res.status(500).send({ status: "error", message: "Error interno" });
     }
-    res.send({
-      status: "success",
-      user: req.user,
-    });
   }
 );
+
+/* ============================================================
+   REQUEST PASSWORD RESET (via email)
+   ============================================================ */
+
+router.post("/recupero", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const user = await userService.findByEmail(email);
+    if (!user) {
+      return res.redirect("/login");
+    }
+
+    const token = generateResetToken(user);
+
+    try {
+      await sendPasswordResetEmail(email, token);
+    } catch (mailError) {
+      console.error("Error enviando mail de recupero:", mailError);
+    }
+    console.log(`LINK DE RECUPERO: http://localhost:3000/reset-password?token=${token}`);
+
+    return res.redirect("/login");
+  } catch (error) {
+    console.error("Error en recupero:", error);
+    return res.status(500).json({ message: "Error interno" });
+  }
+});
+
+
+/* ============================================================
+   RESET PASSWORD form submit
+   ============================================================ */
+
+router.post("/reset-password", async (req, res) => {
+  try {
+    const { token, password } = req.body;
+
+    const payload = verifyToken(token);
+    if (!payload || payload.type !== "password_reset") {
+      return res.status(400).send("Enlace inválido o expirado");
+    }
+
+    const user = await userService.findById(payload.id);
+    if (!user) {
+      return res.status(400).send("Usuario no encontrado");
+    }
+
+    const samePassword = isValidadPassword(password, user.password);
+    if (samePassword) {
+      return res
+        .status(400)
+        .send("El nuevo password no puede ser igual al anterior");
+    }
+
+    const newHash = createHash(password);
+    await userService.changePassword(user._id, newHash);
+
+    return res.redirect("/login");
+
+  } catch (error) {
+    console.error("Error en reset-password:", error);
+    return res.status(500).send("Error interno");
+  }
+});
 
 export default router;
